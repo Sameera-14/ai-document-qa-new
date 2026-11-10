@@ -1,30 +1,31 @@
 
-
 import { NextRequest, NextResponse } from "next/server";
 import { ai } from "@/lib/gemini";
 
+export const maxDuration = 120;
+
 async function generateWithRetry(prompt: string) {
-  const delays = [1000, 2000, 4000];
+  const delays = [1000];
 
   for (let attempt = 0; attempt <= delays.length; attempt++) {
     try {
       const stream = await ai.models.generateContentStream({
         model: "gemini-3.8-flash",
         contents: prompt,
+        config: {
+          abortSignal: AbortSignal.timeout(45000),
+          maxOutputTokens: 1024,
+        },
       });
 
-      // Read the first chunk here so initial streaming errors
-      // are also caught by the retry mechanism.
       const iterator = stream[Symbol.asyncIterator]();
       const firstChunk = await iterator.next();
 
       return { iterator, firstChunk };
     } catch (error: any) {
-      const status = Number(
-        error?.status ??
-        error?.code ??
-        error?.error?.code
-      );
+      const status = Number(error?.status ?? error?.code);
+
+      console.error("Gemini request failed:", status, error);
 
       if (
         ![429, 500, 502, 503, 504].includes(status) ||
@@ -33,17 +34,15 @@ async function generateWithRetry(prompt: string) {
         throw error;
       }
 
-      console.log(
-        `Gemini error ${status}. Retry attempt ${attempt + 1}`
-      );
+      console.log(`Retrying Gemini request: attempt ${attempt + 1}`);
 
-      await new Promise((resolve) =>
+      await new Promise(resolve =>
         setTimeout(resolve, delays[attempt])
       );
     }
   }
 
-  throw new Error("AI service is temporarily unavailable.");
+  throw new Error("Gemini request failed.");
 }
 
 export async function POST(request: NextRequest) {
@@ -51,27 +50,23 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { question, documentText } = body;
 
-    if (!question || typeof question !== "string" || !question.trim()) {
+    if (
+      typeof question !== "string" ||
+      !question.trim() ||
+      question.length > 1000
+    ) {
       return NextResponse.json(
-        { error: "Please enter a valid question." },
+        { error: "Please enter a valid question under 1000 characters." },
         { status: 400 }
       );
     }
 
     if (
-      !documentText ||
       typeof documentText !== "string" ||
       !documentText.trim()
     ) {
       return NextResponse.json(
         { error: "Please upload a document first." },
-        { status: 400 }
-      );
-    }
-
-    if (question.length > 1000) {
-      return NextResponse.json(
-        { error: "Question must be under 1000 characters." },
         { status: 400 }
       );
     }
@@ -135,7 +130,7 @@ ANSWER:
 
           controller.close();
         } catch (error) {
-          console.error("Gemini streaming error:", error);
+          console.error("Streaming failed:", error);
           controller.error(error);
         }
       },
@@ -148,7 +143,7 @@ ANSWER:
       },
     });
 
-  } catch (error) {
+  } catch (error: any) {
     console.error("AI generation error:", error);
 
     return NextResponse.json(
