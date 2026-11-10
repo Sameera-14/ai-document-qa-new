@@ -5,44 +5,69 @@ import { ai } from "@/lib/gemini";
 export const maxDuration = 120;
 
 async function generateWithRetry(prompt: string) {
-  const delays = [1000];
+  const models = [
+    "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
+  ];
 
-  for (let attempt = 0; attempt <= delays.length; attempt++) {
-    try {
-      const stream = await ai.models.generateContentStream({
-        model: "gemini-3.8-flash",
-        contents: prompt,
-        config: {
-          abortSignal: AbortSignal.timeout(45000),
-          maxOutputTokens: 1024,
-        },
-      });
+  const delays = [1000, 2000];
 
-      const iterator = stream[Symbol.asyncIterator]();
-      const firstChunk = await iterator.next();
+  for (const model of models) {
+    for (let attempt = 0; attempt <= delays.length; attempt++) {
+      try {
+        console.log(`Trying Gemini model: ${model}`);
 
-      return { iterator, firstChunk };
-    } catch (error: any) {
-      const status = Number(error?.status ?? error?.code);
+        const stream = await ai.models.generateContentStream({
+          model,
+          contents: prompt,
+          config: {
+            abortSignal: AbortSignal.timeout(45000),
+            maxOutputTokens: 1024,
+          },
+        });
 
-      console.error("Gemini request failed:", status, error);
+        const iterator = stream[Symbol.asyncIterator]();
+        const firstChunk = await iterator.next();
 
-      if (
-        ![429, 500, 502, 503, 504].includes(status) ||
-        attempt === delays.length
-      ) {
-        throw error;
+        console.log(`Gemini model succeeded: ${model}`);
+
+        return { iterator, firstChunk };
+
+      } catch (error: any) {
+        const status = Number(error?.status ?? error?.code);
+
+        console.error(
+          `Gemini ${model} failed:`,
+          status,
+          error
+        );
+
+        const retryable = [
+          429, 500, 502, 503, 504
+        ].includes(status);
+
+        if (!retryable) {
+          throw error;
+        }
+
+        if (attempt < delays.length) {
+          console.log(
+            `Retrying ${model} in ${delays[attempt]}ms`
+          );
+
+          await new Promise(resolve =>
+            setTimeout(resolve, delays[attempt])
+          );
+        }
       }
-
-      console.log(`Retrying Gemini request: attempt ${attempt + 1}`);
-
-      await new Promise(resolve =>
-        setTimeout(resolve, delays[attempt])
-      );
     }
+
+    console.log(`Switching to fallback model.`);
   }
 
-  throw new Error("Gemini request failed.");
+  throw new Error(
+    "All Gemini models are temporarily unavailable."
+  );
 }
 
 export async function POST(request: NextRequest) {
@@ -56,7 +81,9 @@ export async function POST(request: NextRequest) {
       question.length > 1000
     ) {
       return NextResponse.json(
-        { error: "Please enter a valid question under 1000 characters." },
+        {
+          error: "Please enter a valid question under 1000 characters."
+        },
         { status: 400 }
       );
     }
@@ -112,7 +139,9 @@ ANSWER:
             const firstText = firstChunk.value.text || "";
 
             if (firstText) {
-              controller.enqueue(encoder.encode(firstText));
+              controller.enqueue(
+                encoder.encode(firstText)
+              );
             }
           }
 
@@ -129,6 +158,7 @@ ANSWER:
           }
 
           controller.close();
+
         } catch (error) {
           console.error("Streaming failed:", error);
           controller.error(error);
